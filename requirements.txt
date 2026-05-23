@@ -1,6 +1,5 @@
+Flask
 pyrogram
-tgcrypto
-yt-dlp
-flask
-gunicorn
 pyromod
+yt-dlp
+tgcrypto
