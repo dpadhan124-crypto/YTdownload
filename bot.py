@@ -5,7 +5,7 @@ import time
 from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyromod import listen  # Required for client.ask
+from pyromod import listen  # Required for client.ask to work
 from yt_dlp import YoutubeDL
 
 # --- FLASK FOR KEEP-ALIVE ---
@@ -21,7 +21,7 @@ threading.Thread(target=run_flask, daemon=True).start()
 # --- CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID", "12345"))
 API_HASH = os.environ.get("API_HASH", "your_hash")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8655737151:AAEJNKMptLd8vspEKysS7pk-GykKHl-FWXg")
+BOT_TOKEN = "8655737151:AAEJNKMptLd8vspEKysS7pk-GykKHl-FWXg"
 
 CONFIG = {
     "DESTINATION_ID": 0,
@@ -30,28 +30,24 @@ CONFIG = {
 
 app = Client("ytdl_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# --- HELPER FUNCTIONS ---
-
-def get_progress_bar(current, total, status):
+# --- UTILS ---
+def get_progress_bar(current, total):
     percentage = current * 100 / total
-    finished_blocks = int(percentage / 10)
-    remaining_blocks = 10 - finished_blocks
-    bar = "✅" * finished_blocks + "⬜" * remaining_blocks
-    return f"{status}: {percentage:.2f}%\n{bar}\n"
+    completed = int(percentage / 10)
+    return f"[{'■' * completed}{'□' * (10 - completed)}] {percentage:.1f}%"
 
-async def progress_callback(current, total, msg, start_time, status):
+async def progress_func(current, total, msg, start_time, action):
+    now = time.time()
+    diff = now - start_time
+    if diff < 2:  # Only update every 2 seconds to avoid Telegram flood limits
+        return
+    
+    speed = current / diff
+    bar = get_progress_bar(current, total)
+    text = f"**{action}**\n\n{bar}\nSpeed: {humanbytes(speed)}/s"
     try:
-        now = time.time()
-        diff = now - start_time
-        if diff < 3: # Update every 3 seconds to avoid flood limits
-            return
-        
-        speed = current / diff
-        elapsed_time = round(diff) * 1000
-        progress_str = get_progress_bar(current, total, status)
-        
-        await msg.edit(f"{progress_str}\nSpeed: {humanbytes(speed)}/s")
-    except Exception:
+        await msg.edit(text)
+    except:
         pass
 
 def humanbytes(size):
@@ -67,39 +63,21 @@ async def start(client, message):
     buttons = [[InlineKeyboardButton("⚙️ Settings", callback_data="open_settings")]]
     await message.reply_text("**YouTube Downloader**\nSend a link to start.", reply_markup=InlineKeyboardMarkup(buttons))
 
-@app.on_callback_query(filters.regex(r"^open_settings"))
-async def settings_menu(client, query):
-    dest = "Direct" if CONFIG["DESTINATION_ID"] == 0 else CONFIG["DESTINATION_ID"]
-    buttons = [
-        [InlineKeyboardButton(f"📍 Dest: {dest}", callback_data="set_dest")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="open_settings")]
-    ]
-    await query.message.edit("**Settings**", reply_markup=InlineKeyboardMarkup(buttons))
-
 @app.on_message(filters.regex(r"(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/.+"))
 async def link_handler(client, message):
     url = message.text
     buttons = [
-        [InlineKeyboardButton("720p Video", callback_data=f"vid|720|{url}")],
-        [InlineKeyboardButton("MP3 Audio", callback_data=f"aud|320|{url}")]
+        [InlineKeyboardButton("Video (720p)", callback_data=f"vid|720|{url}")],
+        [InlineKeyboardButton("Audio (MP3)", callback_data=f"aud|320|{url}")]
     ]
-    await message.reply_text("Choose Format:", reply_markup=InlineKeyboardMarkup(buttons))
+    await message.reply_text("Select Format:", reply_markup=InlineKeyboardMarkup(buttons))
 
 @app.on_callback_query(filters.regex(r"^(vid|aud)"))
 async def download_handler(client, query):
     data = query.data.split("|")
     media_type, res, url = data[0], data[1], data[2]
-    msg = await query.message.edit("`Analyzing URL...`")
+    msg = await query.message.edit("`Fetching info...`")
     
-    start_time = time.time()
-
-    def ytdl_hook(d):
-        if d['status'] == 'downloading':
-            p = d.get('_percent_str', '0%')
-            s = d.get('_speed_str', 'N/A')
-            # Using synchronous edit is tricky; usually we just let it download
-            # For real-time progress in YTDL, custom loggers are needed.
-
     with YoutubeDL({'quiet': True}) as ydl:
         info = ydl.extract_info(url, download=False)
         title = info.get('title', 'video')
@@ -109,41 +87,38 @@ async def download_handler(client, query):
         filename = f"{title}.{ext}"
 
     try:
-        await msg.edit("`Downloading to Server...`")
+        await msg.edit("`Downloading to server...`")
         ydl_opts = {
             'format': f"bestvideo[height<={res}]+bestaudio/best" if media_type == 'vid' else "bestaudio/best",
             'outtmpl': filename,
             'noplaylist': True,
         }
-        
         with YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-        
-        await msg.edit("`Uploading to Telegram...`")
+
+        await msg.edit("`Preparing upload...`")
+        start_time = time.time()
         target = CONFIG["DESTINATION_ID"] if CONFIG["DESTINATION_ID"] != 0 else query.message.chat.id
         
         if media_type == 'vid':
-            await client.send_video(
-                target, video=filename, caption=f"**{title}**",
-                progress=progress_callback, progress_args=(msg, start_time, "Uploading Video")
-            )
+            await client.send_video(target, video=filename, caption=f"**{title}**", 
+                                  progress=progress_func, progress_args=(msg, start_time, "Uploading Video"))
         else:
-            await client.send_audio(
-                target, audio=filename, caption=f"**{title}**",
-                progress=progress_callback, progress_args=(msg, start_time, "Uploading Audio")
-            )
+            await client.send_audio(target, audio=filename, caption=f"**{title}**",
+                                  progress=progress_func, progress_args=(msg, start_time, "Uploading Audio"))
         
         await msg.delete()
     except Exception as e:
         await msg.edit(f"❌ Error: {str(e)}")
     finally:
+        # Crucial: Delete file from server after upload or if error occurs
         if os.path.exists(filename):
             os.remove(filename)
 
-# --- PROPER STARTUP FOR PYTHON 3.14 ---
+# --- BOOTSTRAP ---
 async def main():
     await app.start()
-    print("Bot Started!")
+    print("Bot is alive!")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
